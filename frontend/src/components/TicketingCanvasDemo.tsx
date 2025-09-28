@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState, useEffect } from "react";
+import React, { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
 type Priority = "Low" | "Medium" | "High" | "Urgent";
@@ -26,6 +26,131 @@ type Comment = {
   attachments?: Attachment[];
 };
 type User = { id: number; email: string; name?: string | null; role: "ADMIN" | "AGENT" | "CLIENT" } | null;
+type AuthenticatedUser = Exclude<User, null>;
+
+type BackendMode = "remote" | "mock";
+type MockStore = { tickets: Ticket[]; comments: Record<string, Comment[]> };
+
+const MOCK_API_BASE = "mock";
+const MOCK_STORAGE_KEY = "ticketing-demo-mock-store";
+
+const DEFAULT_MOCK_STORE: MockStore = {
+  tickets: [
+    {
+      id: "INC-1042",
+      title: "Laptop won't boot after Windows update",
+      description:
+        "My Dell Latitude stops at a black screen after installing last night's Windows updates. Need to get back online before noon meeting.",
+      priority: "High",
+      status: "In Progress",
+      createdAt: "2024-02-05T14:22:00.000Z",
+      updatedAt: "2024-02-06T09:10:00.000Z",
+      acknowledgedAt: "2024-02-05T15:00:00.000Z",
+      attachments: [
+        {
+          id: "boot-error",
+          name: "boot-error.jpg",
+          url: "https://images.unsplash.com/photo-1517336714731-489689fd1ca8?auto=format&fit=crop&w=900&q=60",
+          type: "image/jpeg",
+          size: 245672,
+        },
+      ],
+    },
+    {
+      id: "INC-1188",
+      title: "Teams notifications delayed",
+      description:
+        "Desktop notifications arrive 10+ minutes late on macOS Sonoma. Tried reinstalling the client already.",
+      priority: "Medium",
+      status: "New",
+      createdAt: "2024-02-08T08:45:00.000Z",
+      updatedAt: "2024-02-08T08:45:00.000Z",
+    },
+    {
+      id: "REQ-9305",
+      title: "Request access to Marketing analytics dashboard",
+      description:
+        "Need viewer permissions to the Looker Marketing dashboard for campaign performance review. Manager approval attached.",
+      priority: "Low",
+      status: "Resolved",
+      createdAt: "2024-01-28T12:05:00.000Z",
+      updatedAt: "2024-01-30T17:42:00.000Z",
+      acknowledgedAt: "2024-01-28T13:10:00.000Z",
+      resolvedAt: "2024-01-30T17:40:00.000Z",
+      attachments: [
+        {
+          id: "approval",
+          name: "manager-approval.pdf",
+          url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+          type: "application/pdf",
+          size: 19855,
+        },
+      ],
+    },
+  ],
+  comments: {
+    "INC-1042": [
+      {
+        id: "c1",
+        ticketId: "INC-1042",
+        authorRole: "client",
+        message: "Adding photo of the screen I'm stuck on.",
+        createdAt: "2024-02-05T14:30:00.000Z",
+      },
+      {
+        id: "c2",
+        ticketId: "INC-1042",
+        authorRole: "agent",
+        message: "Thanks! Boot into Safe Mode and disable BitLocker temporarily. I'll call in 10 minutes.",
+        createdAt: "2024-02-06T08:05:00.000Z",
+      },
+    ],
+    "INC-1188": [
+      {
+        id: "c3",
+        ticketId: "INC-1188",
+        authorRole: "agent",
+        message: "Can you confirm you're on Teams 1.7.00?",
+        createdAt: "2024-02-08T09:05:00.000Z",
+      },
+    ],
+    "REQ-9305": [
+      {
+        id: "c4",
+        ticketId: "REQ-9305",
+        authorRole: "agent",
+        message: "Provisioned access via Okta. You should have the invite email now.",
+        createdAt: "2024-01-30T17:41:00.000Z",
+      },
+    ],
+  },
+};
+
+function loadMockStore(): MockStore {
+  if (typeof window === "undefined") return DEFAULT_MOCK_STORE;
+  try {
+    const raw = window.localStorage.getItem(MOCK_STORAGE_KEY);
+    if (!raw) return DEFAULT_MOCK_STORE;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return DEFAULT_MOCK_STORE;
+    return {
+      tickets: Array.isArray(parsed.tickets) ? parsed.tickets : DEFAULT_MOCK_STORE.tickets,
+      comments: parsed.comments && typeof parsed.comments === "object" ? parsed.comments : DEFAULT_MOCK_STORE.comments,
+    };
+  } catch (error) {
+    console.warn("Failed to read mock data from storage", error);
+    return DEFAULT_MOCK_STORE;
+  }
+}
+
+function persistMockStore(store: MockStore) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(MOCK_STORAGE_KEY, JSON.stringify(store));
+  } catch (error) {
+    console.warn("Unable to persist mock data", error);
+  }
+}
 
 function getInitialApiBase(): string {
   try {
@@ -114,15 +239,11 @@ const PILL: Record<string, string> = {
 };
 
 export default function TicketingCanvasDemo() {
-  const [API_BASE_STATE, setApiBase] = useState<string>(getInitialApiBase());
-  useEffect(() => {
-    (window as any).__API_BASE__ = API_BASE_STATE;
-    try {
-      localStorage.setItem("apiBase", API_BASE_STATE);
-    } catch (error) {
-      console.warn("Unable to persist API base", error);
-    }
-  }, [API_BASE_STATE]);
+  const initialBase = getInitialApiBase();
+  const [API_BASE_STATE, setApiBase] = useState<string>(initialBase);
+  const [backendMode, setBackendMode] = useState<BackendMode>(initialBase === MOCK_API_BASE ? "mock" : "remote");
+  const [mockStore, setMockStore] = useState<MockStore>(() => loadMockStore());
+  const isMock = backendMode === "mock";
 
   const [token, setToken] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<User>(null);
@@ -142,27 +263,76 @@ export default function TicketingCanvasDemo() {
   const [showApiModal, setShowApiModal] = useState(false);
   const newSectionRef = useRef<HTMLDivElement | null>(null);
 
+  const updateMockStore = useCallback((updater: (store: MockStore) => MockStore) => {
+    setMockStore((prev) => {
+      const next = updater(prev);
+      persistMockStore(next);
+      return next;
+    });
+  }, []);
+
+  const applyMockUpdate = useCallback(
+    (updater: (store: MockStore) => MockStore) => {
+      updateMockStore((prev) => {
+        const next = updater(prev);
+        setTickets(next.tickets);
+        setCommentsMap(next.comments);
+        return next;
+      });
+    },
+    [updateMockStore]
+  );
+
   useEffect(() => {
+    (window as any).__API_BASE__ = API_BASE_STATE;
+    try {
+      localStorage.setItem("apiBase", API_BASE_STATE);
+    } catch (error) {
+      console.warn("Unable to persist API base", error);
+    }
+  }, [API_BASE_STATE]);
+
+  useEffect(() => {
+    if (API_BASE_STATE === MOCK_API_BASE) {
+      setBackendMode("mock");
+      setTickets(mockStore.tickets);
+      setCommentsMap(mockStore.comments);
+      if (mockStore.tickets.length > 0) setSelectedId(mockStore.tickets[0].id);
+      setBanner({ id: "mock", text: "Running against built-in demo data.", tone: "success" });
+      return;
+    }
+
+    setBackendMode("remote");
     (async () => {
       try {
         await apiJson("/health");
       } catch (error: any) {
         setBanner({
           id: "health",
-          text: `API not reachable at ${API_BASE_STATE}. Click “API” to change the URL. (${error.message})`,
+          text: `API not reachable at ${API_BASE_STATE}. Falling back to demo data. (${error.message})`,
           tone: "error",
         });
+        setApiBase(MOCK_API_BASE);
+        return;
       }
       try {
         const data = await apiJson(`/tickets`);
         const mapped: Ticket[] = data.map(mapTicketFromApi);
         setTickets(mapped);
         if (mapped.length > 0) setSelectedId(mapped[0].id);
+        setCommentsMap({});
       } catch (error: any) {
         setBanner({ id: "err", text: `Failed to load tickets: ${error.message}`, tone: "error" });
       }
     })();
   }, [API_BASE_STATE]);
+
+  useEffect(() => {
+    if (isMock) {
+      setTickets(mockStore.tickets);
+      setCommentsMap(mockStore.comments);
+    }
+  }, [isMock, mockStore]);
 
   useEffect(() => {
     if (!selectedId && tickets.length > 0) setSelectedId(tickets[0].id);
@@ -197,6 +367,16 @@ export default function TicketingCanvasDemo() {
   }, [tickets, query, filterStatus, filterPriority]);
 
   async function signIn(email: string, password: string) {
+    if (isMock) {
+      const roleName = email.includes("admin") ? "ADMIN" : email.includes("agent") ? "AGENT" : "CLIENT";
+      const user: AuthenticatedUser = { id: Date.now(), email, name: email.split("@")[0], role: roleName };
+      setCurrentUser(user);
+      setRole(roleName === "AGENT" || roleName === "ADMIN" ? "agent" : "client");
+      setToken("mock-token");
+      setBanner({ id: "login", text: "Signed in (demo mode).", tone: "success" });
+      return;
+    }
+
     try {
       const data = await apiJson("/auth/login", {
         method: "POST",
@@ -215,12 +395,48 @@ export default function TicketingCanvasDemo() {
   }
 
   async function refreshTickets() {
+    if (isMock) {
+      setTickets(mockStore.tickets);
+      return;
+    }
     const data = await apiJson(`/tickets`, {}, token || undefined);
     const mapped: Ticket[] = data.map(mapTicketFromApi);
     setTickets(mapped);
   }
 
   async function createTicket(data: Pick<Ticket, "title" | "description" | "priority">, files: File[]) {
+    if (isMock) {
+      const id = `WEB-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+      const nowIso = now();
+      const attachments = files.map((file) => ({
+        id: file.name,
+        name: file.name,
+        url: URL.createObjectURL(file),
+        type: file.type || "application/octet-stream",
+        size: file.size,
+      }));
+      const newTicket: Ticket = {
+        id,
+        title: data.title,
+        description: data.description,
+        priority: data.priority,
+        status: "New",
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        attachments: attachments.length ? attachments : undefined,
+      };
+      applyMockUpdate((prev) => ({
+        tickets: [newTicket, ...prev.tickets],
+        comments: { ...prev.comments, [id]: [] },
+      }));
+      setSelectedId(id);
+      setBanner({ id, text: `Ticket ${id} created successfully (demo mode)`, tone: "success" });
+      setTimeout(() => setBanner(null), 4000);
+      if (showNewMobile) setShowNewMobile(false);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+
     try {
       const fd = new FormData();
       fd.append("title", data.title);
@@ -244,6 +460,31 @@ export default function TicketingCanvasDemo() {
   }
 
   async function updateStatus(id: string, status: Status) {
+    if (isMock) {
+      applyMockUpdate((prev) => ({
+        tickets: prev.tickets.map((ticket) => {
+          if (ticket.id !== id) return ticket;
+          const updated: Ticket = { ...ticket, status, updatedAt: now() };
+          if (status === "New") {
+            updated.acknowledgedAt = undefined;
+            updated.resolvedAt = undefined;
+          }
+          if (status === "In Progress") {
+            updated.acknowledgedAt = updated.acknowledgedAt || now();
+            updated.resolvedAt = undefined;
+          }
+          if (status === "Resolved" || status === "Closed") {
+            updated.resolvedAt = now();
+          }
+          return updated;
+        }),
+        comments: prev.comments,
+      }));
+      setBanner({ id: `status-${id}`, text: `Status updated (demo mode)`, tone: "success" });
+      setTimeout(() => setBanner(null), 3000);
+      return;
+    }
+
     try {
       if (!token) throw new Error("Please sign in as agent/admin");
       const body = { status: toApiStatus(status) };
@@ -255,6 +496,10 @@ export default function TicketingCanvasDemo() {
   }
 
   async function fetchComments(ticketId: string) {
+    if (isMock) {
+      setCommentsMap((prev) => ({ ...prev, [ticketId]: mockStore.comments[ticketId] || [] }));
+      return;
+    }
     try {
       const list = await apiJson(`/tickets/${ticketId}/comments`);
       const mapped: Comment[] = (list as any[]).map((c) => ({
@@ -271,6 +516,28 @@ export default function TicketingCanvasDemo() {
   }
 
   async function addComment(ticketId: string, message: string, files: File[]) {
+    if (isMock) {
+      const comment: Comment = {
+        id: Math.random().toString(36).slice(2),
+        ticketId,
+        authorRole: role,
+        message,
+        createdAt: now(),
+        attachments: files.map((file) => ({
+          id: file.name,
+          name: file.name,
+          url: URL.createObjectURL(file),
+          type: file.type || "application/octet-stream",
+          size: file.size,
+        })),
+      };
+      applyMockUpdate((prev) => ({
+        tickets: prev.tickets,
+        comments: { ...prev.comments, [ticketId]: [...(prev.comments[ticketId] || []), comment] },
+      }));
+      return;
+    }
+
     try {
       if (files.length) {
         const fd = new FormData();
@@ -404,6 +671,11 @@ export default function TicketingCanvasDemo() {
             <button onClick={() => setShowApiModal(true)} className="ml-2 rounded border px-2 py-1 text-xs">
               API
             </button>
+            {isMock && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-900">
+                Demo data
+              </span>
+            )}
           </div>
         </div>
         {(filterPriority !== "All" || filterStatus !== "All" || query.trim()) && (
@@ -517,6 +789,9 @@ export default function TicketingCanvasDemo() {
               <p className="mt-3 text-xs text-gray-600">
                 Change the API origin here or by setting <code>window.API_BASE</code>,
                 <code>localStorage.apiBase</code>, or the <code>?api=</code> query parameter.
+              </p>
+              <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                Tip: enter <code>mock</code> to load the built-in demo API instantly if you don't have a backend running.
               </p>
             </div>
           </div>
