@@ -19,10 +19,10 @@ The UI lives under `frontend/` and is built with React, Vite, and Framer Motion.
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run demo
 ```
 
-Configure the API base URL by using one of the following options from the browser console:
+The `demo` script launches Vite, opens your browser automatically, and loads the built-in mock API so the UI works instantly without provisioning a backend. If you do have the Fastify service running elsewhere, open the API modal (top-right "API" button) and paste its base URL, or set one of the following from the browser console:
 
 1. `localStorage.setItem('apiBase', 'http://localhost:4000')`
 2. `window.API_BASE = 'http://localhost:4000'`
